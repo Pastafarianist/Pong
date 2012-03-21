@@ -1,0 +1,621 @@
+program Pong;
+
+type TPlatform = record
+			posX, sizeX, thick: Integer; // расстояние от левого края экрана, ширина, толщина
+			end;
+
+type	TBall = record
+			posX, posY, dirX, dirY, size: Integer; // расстояние слева и сверху, направление, размер
+			end;
+			
+type TMenuLine = record
+			caption, action: String;
+			end;
+
+var platP, platB: TPlatform; // платформы
+		scoreP, scoreB: Integer; // набранные очки
+		botscores, timescores: array [1..5] of String; // текущие очки, синхронизированные с RecordStore
+    scrH, scrW: Integer; // размеры экрана
+    key: Integer; // нажатая клавиша
+    step: Integer; // шаг шарика
+    time: Integer; // время (нужно для FPS <= 30)
+    ball: TBall; // шарик (т. е. квадратик)
+		curmenu: array [0..3] of TMenuLine; // пункты меню
+		menuLength: Integer; // длина меню
+		selMenu: Integer; // текущий пункт меню
+		moveBack: Boolean; // нужно ли переходить на предыдущий уровень меню
+		quit: Boolean; // выходить ли из игры; прерывает работу всех циклов
+		timestart: Integer; // для замера времени в режиме TimeRush
+		PlatSpeed: Integer; // для изменения скорости платформ
+		black, white: Integer; // для эффекта инвертирования цветов
+		
+procedure EraseScreen; // очистка экрана, то есть заливка чёрным
+begin
+SetColor (black, black, black);
+FillRect (0, 0, scrW, scrH);
+end;
+		
+procedure drawN (distX, distY, sizeX, sizeY: Integer); // рисует фигуру в форме арки или буквы n, нужно для построения логотипа
+var bigX: Integer;
+begin
+bigX := sizeY + sizeY + sizeY;
+FillRect (distX, distY, sizeX, bigX);
+FillRect (distX + sizeX, distY, sizeX, sizeY);
+FillRect (distX + sizeX + sizeX, distY, sizeX, bigX);
+end;
+
+procedure drawLogo; // прорисовка логотипа
+var vert, bigVert, hor, distW, distH: Integer;
+begin
+	hor := scrW div 17;
+	vert := scrH div 24;
+	distH := scrH div 8;
+	bigVert := distH;
+	distW := hor;
+	SetColor (white, white, white);
+	drawN (distW, distH, hor, vert);
+	FillRect (distW, distH + distH, hor, bigVert);
+	FillRect (distW + hor, distH + vert + vert, hor, vert); //P
+	distW := hor*5;
+	distH := scrH div 4;
+	drawN (distW, distH, hor, vert);
+	FillRect (distW + hor, distH + vert + vert, hor, vert); //o
+	distW := hor*9;
+	drawN (distW, distH, hor, vert); //n
+	distW := hor*13;
+	drawN (distW, distH, hor, vert);
+	FillRect (distW, distH + bigVert + vert, hor + hor + hor, vert);
+	FillRect (distW + hor, distH + vert + vert, hor, vert);
+	FillRect (distW + hor + hor, distH + vert + vert + vert, hor, vert); //g
+end;
+
+procedure drawMenu; // прорисовка меню, записанного в переменной curmenu
+var i, c, distH: Integer; // счётчик цикла, дополнительный счётчик
+begin
+	setFont(FONT_FACE_PROPORTIONAL, FONT_STYLE_PLAIN, FONT_SIZE_MEDIUM);
+	c := 0;
+	for i := 0 to menuLength do c := c + getStringHeight (curmenu [i].caption);
+	c := c + menuLength * 3;
+	distH := scrH/2 + ((scrH / 2 - c) / 2);
+	for i := 0 to menuLength do 
+		begin
+		c := scrW / 4 * 3 - (getStringWidth (curmenu [i].caption)) / 2;
+		if i = selMenu then 
+			begin
+			setColor (white, white, white);
+			FillRect (c - 1, distH - 1, getStringWidth (curmenu [i].caption) + 2, getStringHeight (curmenu [i].caption) + 2);
+			setColor (black, black, black);
+			drawText (curmenu [i].caption, c, distH);
+		end else
+			begin
+			setColor (black, black, black);
+			FillRect (c - 1, distH - 1, getStringWidth (curmenu [i].caption) + 2, getStringHeight (curmenu [i].caption) + 2);
+			setColor (white, white, white);
+			drawText (curmenu [i].caption, c, distH);
+			end;
+		distH := distH + getStringHeight (curmenu [i].caption) + 3;
+		end;
+	repaint;
+end;
+		
+function BoolRandom (a, b: Integer): Integer; // функция, принимающая 2 аргумента и возвращающая 1 из них, рандомно; нужна для выбора направления шарика при старте
+begin
+if Random (2) = 0 then BoolRandom := a else BoolRandom := b;
+end;
+
+procedure Wait; // реализует ограничение FPS, не превышающее 30
+begin
+  if GetRelativeTimeMs - time < 33 then while GetRelativeTimeMs - time < 33 do delay (1);
+	time := GetRelativeTimeMs;
+end;
+		
+procedure RefreshScreen (DrawScores, NeedRepaint: Boolean); // основная процедура геймплея, фактически рисующая весь экран в текущем состоянии; изменением этого состояния занимаются непосредственно процедуры SingleGame и TimeGame
+var 	outputText: string;
+begin
+  EraseScreen; // заливка фона чёрным цветом
+  SetColor (128, 128, 128);
+  FillRect (0, scrH/2-1, scrW, 2); // рисование центральной серой линии
+  if DrawScores then 
+		begin
+		setFont(FONT_FACE_PROPORTIONAL, FONT_STYLE_PLAIN, FONT_SIZE_SMALL);
+		outputText := '' + scoreP;
+		drawText(outputText, (scrW - getStringWidth(outputText)) - 3,
+		 		               (scrH - getStringHeight(outputText)) - 3);
+		outputText := '' + scoreB;
+		drawText(outputText, (scrW - getStringWidth(outputText)) - 3, 3);
+		end;
+	SetColor (255,255,255);
+  FillRect (platP.posX, scrH - platP.thick, platP.sizeX, platP.thick);
+  FillRect (platB.posX, 0, platB.sizeX, platB.thick);
+  FillRect (ball.posX, ball.posY, ball.size, ball.size); // просто прорисовка шарика в текущей позиции
+  if NeedRepaint then Repaint;
+end;
+
+procedure MovePlatform (Player: Boolean; Left: Boolean; Bot: Boolean); // реализует перемещение платформ и для игрока, и для бота, но с разными алгоритмами
+var i: Integer;
+begin
+  if Bot then i := Random (7) + step - 3 else i := PlatSpeed;
+  if Player and Left then if platP.posX - i > 0 then platP.posX := platP.posX - i else platP.posX := 0;
+  if Player and not Left then if platP.posX + platP.sizeX + i < scrW then platP.posX := platP.posX + i else platP.posX := scrW - platP.sizeX;
+  if not Player and Left then if platB.posX - i > 0 then platB.posX := platB.posX - i else platB.posX := 0;    
+  if not Player and not Left then if platB.posX + platB.sizeX + i < scrW then platB.posX := platB.posX + i else platB.posX := scrW - platB.sizeX;
+end;
+
+
+procedure AI; // типа искусственный интеллект =) платформа бота центром отслеживает шарик
+begin
+if ball.posX + ball.size/2 > platB.posX + platB.sizeX/2 then MovePlatform (False, False, True);
+if ball.posX + ball.size/2 < platB.posX + platB.sizeX/2 then MovePlatform (False, True, True);
+end;
+
+
+procedure RestartBall (PlayerWins, TimeMode: Boolean); // вызывается в начале игры и если кто-то проигрывает мяч; восстанавливает параметры мяча и даёт игроку перезапустить мяч, а в случае бота просто отправляет его в полёт с центра его платформы
+begin // первая переменная обозначает того, КТО выигрывает и получает мяч
+  ball.size := scrW/20;
+  step := scrH / 32;
+  
+  if PlayerWins then begin
+		ball.posX := platP.posX + platP.sizeX/2 - ball.size/2;
+		ball.posY := scrH - platP.thick - ball.size;
+		ball.dirX := BoolRandom (step, -step); ball.dirY := -step;
+		repeat
+			if TimeMode then RefreshScreen (False, True) else RefreshScreen (True, True);
+		  key := GetKeyPressed;
+			if key = KE_KEY4 then begin MovePlatform (True, True, False); if TimeMode then MovePlatform (False, True, False); ball.posX := platP.posX + platP.sizeX/2 - ball.size/2; end
+				else if key = KE_KEY6 then begin MovePlatform (True, False, False); if TimeMode then MovePlatform (False, False, False); ball.posX := platP.posX + platP.sizeX/2 - ball.size/2; end
+					else if key = KE_KEY0 then moveBack := True;
+		AI;
+		Wait;
+		until (GetKeyClicked = KE_KEY5) or (moveBack = True);
+		end else
+	
+	if not PlayerWins then begin
+		ball.posX := platB.posX + platB.sizeX/2 - ball.size/2;
+		ball.posY := platB.thick;
+		ball.dirX := BoolRandom (step, -step); ball.dirY := step; end;
+end;
+
+procedure LRReflect; // проверка отражений мяча от боков экрана
+var c: Integer;
+begin
+	if ball.posX + ball.dirX < 0 then
+		begin
+		ball.posX := step - ball.posX;
+		ball.dirX := -ball.dirX;
+		end else
+  if ball.posX + ball.size + ball.dirX > scrW then
+		begin
+		c := scrW - ball.posX - ball.size;
+		ball.posX := ball.posX - (step - c - c);
+		ball.dirX := -ball.dirX;
+		end else ball.posX := ball.posX + ball.dirX;
+end;
+
+function PlayerPlatReflect: Boolean; // проверка отражений мяча от платформ
+begin
+  if ((ball.posX + ball.size + ball.dirX > platP.posX)
+   and (ball.posX + ball.dirX < platP.posX + platP.sizeX)
+    and (ball.posY + ball.size + ball.dirY > scrH - platP.thick))
+			then PlayerPlatReflect := True else PlayerPlatReflect := False;
+end;
+
+function BotPlatReflect: Boolean;
+begin
+	if ((ball.posX + ball.size + ball.dirX > platB.posX)
+   and (ball.posX + ball.dirX < platB.posX + platB.sizeX)
+    and (ball.posY + ball.dirY < platB.thick))
+			then BotPlatReflect := True else BotPlatReflect := False;
+end;
+
+procedure PlatReflect; //расчёт столкновения с платформами
+var c: Integer;
+begin
+  if PlayerPlatReflect then
+		begin
+		c := scrH - platP.thick - ball.size - ball.posY;
+		ball.posY := ball.posY - (step - c - c);
+		ball.dirY := -ball.dirY;
+		end else
+		
+	if BotPlatReflect then
+		begin
+		c := ball.posY - platB.thick;
+		ball.posY := ball.posY + (step - c - c);
+		ball.dirY := -ball.dirY;
+		end else ball.posY := ball.posY + ball.dirY;
+end;
+
+procedure PlayerMovePlatform (TimeGame: Boolean); // обрабатывает нажатия клавиш в игре
+begin
+  key := GetKeyPressed;
+  if (KeyToAction (key) = GA_LEFT) or (key = KE_KEY4) then begin MovePlatform (True, True, False); if TimeGame then MovePlatform (False, True, False); end;
+   else if (KeyToAction (key) = GA_RIGHT) or (key = KE_KEY6) then begin MovePlatform (True, False, False); if TimeGame then MovePlatform (False, False, False); end;
+end;
+
+procedure InitGame (TimeMode: Boolean); // готовит игру: инициализирует переменные и перезапускает мяч
+begin
+  scoreP := 0;
+  scoreB := 0;
+	platP.sizeX := scrW/4;
+  platB.sizeX := scrW/4;
+  platP.posX := scrW/2 - platP.sizeX/2;
+  platB.posX := scrW/2 - platB.sizeX/2;
+  PlatSpeed := scrW/30;
+  ball.size := scrW/20;
+  platP.thick := ball.size;
+  platB.thick := ball.size;
+  time := GetRelativeTimeMs;
+  if TimeMode then RestartBall (True, True) else RestartBall (True, False);
+end;
+
+procedure LoadScores; // подгрузка записей из RecordStore в массивы botscores и timescores
+var rsBot, rsTime: RecordStore;
+		i, c: Integer;
+begin
+	rsBot := OpenRecordStore ('BotScores');
+	if GetRecordStoreNextID (rsBot) = 1 then for i := 1 to 5 do c := AddRecordStoreEntry (rsBot, '0');
+	for i := 1 to 5 do botscores [i] := ReadRecordStoreEntry (rsBot, i);
+	CloseRecordStore (rsBot);
+	rsTime := OpenRecordStore ('TimeScores');
+	if GetRecordStoreNextID (rsTime) = 1 then for i := 1 to 5 do c := AddRecordStoreEntry (rsTime, '0');
+	for i := 1 to 5 do timescores [i] := ReadRecordStoreEntry (rsTime, i);
+	CloseRecordStore (rsTime);
+end;
+
+procedure SaveBotScores; // сохранение очков против бота в RecordStore
+var rsBot: RecordStore;
+		i, c: Integer;
+begin
+	rsBot := OpenRecordStore ('BotScores');
+	if GetRecordStoreNextID (rsBot) = 1 then for i := 1 to 5 do c := AddRecordStoreEntry (rsBot, '0');
+	for i := 1 to 5 do ModifyRecordStoreEntry (rsBot, botscores [i], i);
+	CloseRecordStore (rsBot);
+end;
+
+procedure SaveTimeScores; // сохранение времени в режиме TimeRush в RecordStore
+var rsTime: RecordStore;
+		i, c: Integer;
+begin
+	rsTime := OpenRecordStore ('TimeScores');
+	if GetRecordStoreNextID (rsTime) = 1 then for i := 1 to 5 do c := AddRecordStoreEntry (rsTime, '0');
+	for i := 1 to 5 do ModifyRecordStoreEntry (rsTime, timescores [i], i);
+	CloseRecordStore (rsTime);
+end;
+
+function TimeToString (Time: Integer): String; // перевод времени из "количества микросекунд" в минуты:секунды.микросекунды
+var timeoutput: String;
+		temp: Integer;
+		i: Integer;
+begin
+	temp := Time;
+  timeoutput := IntegerToString (temp / 60000) + ':'; // минуты
+  temp := temp mod 60000;
+  i := temp / 1000;
+  if i > 9 then timeoutput := timeoutput + IntegerToString (i) + '.' else timeoutput := timeoutput + '0' + IntegerToString (i) + '.'; // секунды
+  temp := temp mod 1000;
+  if temp > 99 then timeoutput := timeoutput + IntegerToString (temp) else
+		if temp > 9 then timeoutput := timeoutput + '0' + IntegerToString (temp) else
+			timeoutput := timeoutput + '00' + IntegerToString (temp); // миллисекунды
+	TimeToString := timeoutput;
+end;
+
+procedure InsertBotScore (score: String; pos: Integer); // вставляет в массив botscores новую запись
+var i: Integer;
+begin
+	if pos = 5 then botscores [5] := score else
+		begin
+		for i := 4 downto pos do botscores [i + 1] := botscores [i];
+		botscores [pos] := score;
+		end;
+end;
+
+procedure InsertTimeScore (score: String; pos: Integer); // вставляет в массив timescores новую запись
+var i: Integer;
+begin
+	if pos = 5 then timescores [5] := score else
+		begin
+		for i := 4 downto pos do timescores [i + 1] := timescores [i];
+		timescores [pos] := score;
+		end;
+end;
+
+procedure NewBotScore (score: String); // если установлен новый рекорд, он записывается в массив botscores
+var i: Integer;
+begin
+	for i := 1 to 5 do
+		if StringToInteger (score) > StringToInteger (botscores [i]) then
+			begin
+			InsertBotScore (score, i);
+			Break;
+			end;
+SaveBotScores;
+end;
+
+procedure NewTimeScore (score: String); // если установлен новый рекорд, он записывается в массив timescores
+var i: Integer;
+begin
+	for i := 1 to 5 do
+		if StringToInteger (score) > StringToInteger (timescores [i]) then
+			begin
+			InsertTimeScore (score, i);
+			Break;
+			end;
+	SaveTimeScores;
+end;
+
+procedure SingleGame; // основная процедура управления игрой против бота
+var SpeedChanged: Boolean;
+		i, p: Integer; // для сохранения времени, для уточнения расчёта столкновений с платформами
+begin
+  InitGame (False);
+  
+  timestart := GetRelativeTimeMs;
+  i := 60000 / step;
+  p := (platP.sizeX / 2) / step;
+  SpeedChanged := True;
+  
+  repeat
+  RefreshScreen (True, True);
+  PlayerMovePlatform (False);
+  AI;
+  if GetKeyClicked = KE_POUND then
+		begin
+		drawText ('PAUSED', scrW/2 - (GetStringWidth ('PAUSED') / 2), scrH / 4 - (GetStringHeight ('PAUSED') / 2));
+		Repaint;
+		repeat delay (100); timestart := timestart + 100; until GetKeyClicked = KE_POUND;
+		end;
+  Wait;
+  
+  if (GetRelativeTimeMs - timestart) mod i < (i / 10) then // сей хитрый кусочек кода делает так, чтобы каждую минуту шарик ускорялся в 2 раза, а платформы значительно уменьшались, но это должно происходить равномерно
+		begin
+		if not SpeedChanged then
+			begin
+			step := step + 1;
+			if ball.dirX > 0 then ball.dirX := step else ball.dirX := -step;
+			if ball.dirY > 0 then ball.dirY := step else ball.dirY := -step;
+			PlatSpeed := PlatSpeed + 1;
+			if platP.sizeX > ball.size then
+				begin
+				platP.sizeX := platP.sizeX - p;
+				platP.posX := platP.posX + (p / 2);
+				platB.sizeX := platB.sizeX - p;
+				platB.posX := platB.posX + (p / 2);
+				end;
+			black := 255;
+			white := 0;
+			SpeedChanged := True;
+			end else begin black := 0; white := 255; end;
+		end else SpeedChanged := False;
+  
+  LRReflect; // проверка, пересечёт ли шарик на следующем шаге боковую границу экрана
+  
+  PlatReflect;
+  
+  if ball.posY {+ ball.dirY} > scrH then
+		begin
+		scoreB := scoreB + 1;
+		timestart := GetRelativeTimeMs;
+		platP.sizeX := scrW/4;
+		platB.sizeX := scrW/4;
+		PlatSpeed := scrW/30;
+		RestartBall (False, False);
+		end
+  else if ball.posY + ball.size {+ ball.dirY} < 0 then
+		begin
+		scoreP := scoreP + 1;
+		timestart := GetRelativeTimeMs;
+		platP.sizeX := scrW/4;
+		platB.sizeX := scrW/4;
+		PlatSpeed := scrW/30;
+		RestartBall (True, False);
+		end; // проверка, пересечёт ли шарик на следующем шаге верхнюю либо нижнюю границу экрана, начисление очков, перезапуск шарика
+  until (key = KE_KEY0) or (moveBack = True);
+  NewBotScore (IntegerToString (scoreP - scoreB));
+  black := 0; white := 255;
+end;
+
+procedure TimeGame; // основная процедура управления игрой в режиме TimeRush
+var GameOver, SpeedChanged: Boolean;
+		i, c, p: Integer; // для сохранения времени
+begin
+  InitGame (True);
+  timestart := GetRelativeTimeMs;
+  
+  i := 60000 / step;
+  p := (platP.sizeX / 2) / step;
+  SpeedChanged := True;
+  
+  repeat
+  RefreshScreen (False, False);
+  PlayerMovePlatform (True);
+  if GetKeyClicked = KE_POUND then
+		begin
+		drawText ('PAUSED', scrW/2 - (GetStringWidth ('PAUSED') / 2), scrH / 4 - (GetStringHeight ('PAUSED') / 2));
+		Repaint;
+		repeat delay (100); timestart := timestart + 100; until GetKeyClicked = KE_POUND;
+		end;
+  SetColor (128, 128, 128);
+  c := GetRelativeTimeMs - timestart;
+  drawText (TimeToString (c), 3, 3);
+  Repaint;
+  Wait;
+  
+  if c mod i < (i / 10) then // сей хитрый кусочек кода делает так, чтобы каждую минуту шарик ускорялся в 2 раза, а платформы значительно уменьшались, но это должно происходить равномерно
+		begin
+		if not SpeedChanged then
+			begin
+			step := step + 1;
+			if ball.dirX > 0 then ball.dirX := step else ball.dirX := -step;
+			if ball.dirY > 0 then ball.dirY := step else ball.dirY := -step;
+			PlatSpeed := PlatSpeed + 1;
+			if platP.sizeX > ball.size then
+				begin
+				platP.sizeX := platP.sizeX - p;
+				platP.posX := platP.posX + (p / 2);
+				platB.sizeX := platB.sizeX - p;
+				platB.posX := platB.posX + (p / 2);
+				end;
+			black := 255;
+			white := 0;
+			SpeedChanged := True;
+			end else begin black := 0; white := 255; end;
+		end else SpeedChanged := False;
+		
+  LRReflect; // проверка, пересечёт ли шарик на следующем шаге боковую границу экрана
+  
+	PlatReflect;
+  if (ball.posY {+ ball.dirY} > scrH) or (ball.posY + ball.size {+ ball.dirY} < 0) then
+		begin
+		i := GetRelativeTimeMs - timestart;
+		GameOver := True;
+		delay (500);
+		end;// проверка, пересечёт ли шарик на следующем шаге верхнюю либо нижнюю границу экрана
+  until (key = KE_KEY0) or (GameOver = True) or (moveBack = True);
+	if GameOver then NewTimeScore (IntegerToString (i)) else NewTimeScore (IntegerToString (GetRelativeTimeMs - timestart));
+	black := 0; white := 255;
+end;
+
+procedure DrawScores; // прорисовка очков: подгрузка значений из массивов и вывод их на экран
+var i, c, distH: Integer;
+		OutputBot, OutputTime: array [0..5] of String;
+begin
+	OutputBot [0] := 'VS Bot';
+	for i := 1 to 5 do	OutputBot [i] :=	botscores [i];
+	OutputTime [0] := 'Time rush';
+	for i := 1 to 5 do OutputTime [i] := TimeToString (StringToInteger (timescores [i]));
+	
+	EraseScreen;
+	
+	setFont(FONT_FACE_PROPORTIONAL, FONT_STYLE_PLAIN, FONT_SIZE_SMALL);
+	c := 0;
+	for i := 0 to 5 do c := c + getStringHeight (OutputBot [i]);
+	c := c + 15;
+	distH := scrH/2 - c/2;
+	for i := 0 to 5 do 
+		begin
+		c := scrW / 4 - (getStringWidth (OutputBot [i])) / 2;
+		setColor (white, white, white);
+		drawText (OutputBot [i], c, distH);
+		distH := distH + getStringHeight (OutputBot [i]) + 3;
+		end;
+	c := 0;
+	for i := 0 to 5 do c := c + getStringHeight (OutputTime [i]);
+	c := c + 15;
+	distH := scrH/2 - c/2;
+	for i := 0 to 5 do 
+		begin
+		c := scrW / 4 * 3 - (getStringWidth (OutputTime [i])) / 2;
+		setColor (white, white, white);
+		drawText (OutputTime [i], c, distH);
+		distH := distH + getStringHeight (OutputTime [i]) + 3;
+		end;
+	repaint;
+	repeat delay (100) until GetKeyClicked <> KE_NONE;
+	EraseScreen;
+end;
+
+procedure DrawAbout; // рисует экран "About"
+var about: array [0..8] of String;
+		i, c, distH: Integer; // счётчик цикла, дополнительный счётчик
+begin
+	about [0] := 'Copyright 2009';
+	about [1] := 'Freidom';
+	about [2] := '';
+	about [3] := 'Controls:';
+	about [4] := '4 - left';
+	about [5] := '6 - right';
+	about [6] := '5 - start ball';
+	about [7] := '0 - back';
+	about [8] := '# - pause';
+
+	EraseScreen;
+	
+	setFont(FONT_FACE_PROPORTIONAL, FONT_STYLE_PLAIN, FONT_SIZE_MEDIUM);
+	c := 0;
+	for i := 0 to 8 do c := c + getStringHeight (about [i]);
+	c := c + 24;
+	distH := scrH/2 - c/2;
+	for i := 0 to 8 do 
+		begin
+		c := scrW / 2 - (getStringWidth (about [i])) / 2;
+		setColor (white, white, white);
+		drawText (about [i], c, distH);
+		distH := distH + getStringHeight (about [i]) + 3;
+		end;
+	repaint;
+	repeat key := GetKeyClicked; delay (100) until key <> KE_NONE;
+	EraseScreen;
+end;
+
+procedure InitMainMenu; // готовит к прорисовке главного меню
+begin
+	EraseScreen; // заливка фона чёрным цветом
+	SetColor (white, white, white);
+	drawLogo;
+	curmenu [0].caption := 'Play'; // меню
+	curmenu [0].action := 'openplaymenu';
+	curmenu [1].caption := 'Scores';
+	curmenu [1].action := 'openscores';
+	curmenu [2].caption := 'About';
+	curmenu [2].action := 'openabout';
+	curmenu [3].caption := 'Quit';
+	curmenu [3].action := 'quitgame';
+	menuLength := 3;
+	selMenu := 0;
+end;
+
+procedure InitPlayMenu; // подготовка к прорисовке меню "Play"
+begin
+	EraseScreen; // заливка фона чёрным цветом
+	SetColor (white, white, white);
+	drawLogo;
+	curmenu [0].caption := 'Play vs Bot'; // меню
+	curmenu [0].action := 'playsingle';
+	curmenu [1].caption := 'Time rush';
+	curmenu [1].action := 'playtime';
+	curmenu [2].caption := 'Back';
+	curmenu [2].action := 'openmainmenu';
+	menuLength := 2;
+	selMenu := 0;
+end;
+
+procedure ControlMenu (cmd: String); // переизобретение биндов =) каждому пункту меню назначается своё действие
+begin
+if cmd = 'openplaymenu' then InitPlayMenu;
+if cmd = 'openscores' then begin DrawScores; drawLogo; end;
+if cmd = 'openabout' then begin DrawAbout; drawLogo; end;
+if cmd = 'quitgame' then quit := True;
+if cmd = 'playsingle' then begin SingleGame; moveBack := False; end;
+if cmd = 'playtime' then begin TimeGame; moveBack := False; end;
+if cmd = 'openmainmenu' then InitMainMenu;
+end;
+
+begin
+	//DeleteRecordStore ('BotScores');
+	//DeleteRecordStore ('TimeScores');
+  scrW := GetWidth;  
+  scrH := GetHeight;
+  
+  black := 0;
+  white := 255;
+	
+	EraseScreen;
+	
+	LoadScores;
+	
+	InitMainMenu;
+	moveBack := False;
+	
+	drawLogo;
+	
+	repeat
+	drawMenu;
+	repeat key := GetKeyClicked; delay (100) until key <> KE_NONE;
+		
+	if (KeyToAction (key) = GA_UP) or (key = KE_KEY2) then begin if selMenu = 0 then selMenu := menuLength else selMenu := selMenu - 1 end;
+	if (KeyToAction (key) = GA_DOWN) or (key = KE_KEY8) then begin if selMenu = menuLength then selMenu := 0 else selMenu := selMenu + 1 end;
+	if (KeyToAction (key) = GA_FIRE) or (key = KE_KEY5) then ControlMenu (curmenu [selMenu].action);
+	
+	until quit = True;
+end.
+ 
